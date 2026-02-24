@@ -1,0 +1,61 @@
+# ============================================================
+# AI_Assistant Docker Compose 编排
+#
+# 服务：
+#   frontend  - Nginx 静态前端 (port 3000)
+#   backend   - FastAPI 后端   (port 8001)
+#
+# 依赖：
+#   RAG_Memory 项目需先启动，本项目通过 RAG_MEMORY_URL 与其通信。
+#   默认假设 RAG_Memory 的 rag-api 容器在同一 Docker bridge 网络中，
+#   或通过 host.docker.internal 访问宿主机上的 RAG_Memory 服务。
+# ============================================================
+
+version: "3.8"
+
+networks:
+  assistant-network:
+    driver: bridge
+
+services:
+
+  # ── 前端：Nginx 静态服务 ──────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: ai-assistant-frontend
+    restart: unless-stopped
+    ports:
+      - "3000:80"
+    networks:
+      - assistant-network
+    depends_on:
+      - backend
+
+  # ── 后端：FastAPI ─────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: ai-assistant-backend
+    restart: unless-stopped
+    ports:
+      - "8001:8001"
+    env_file:
+      - .env
+    environment:
+      # RAG_Memory 服务地址
+      # 若 RAG_Memory 也在 Docker 中，需将两个 compose 加入同一网络，
+      # 或使用 host.docker.internal 访问宿主机
+      RAG_MEMORY_URL: ${RAG_MEMORY_URL:-http://host.docker.internal:8000}
+    volumes:
+      - ./backend/data:/app/data   # SQLite 数据库持久化
+    networks:
+      - assistant-network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
