@@ -1,0 +1,40 @@
+# ============================================================
+# RAG_Memory Python 依赖清单
+# ============================================================
+
+# --- Web 框架 ---
+fastapi==0.111.0
+uvicorn[standard]==0.29.0
+
+# --- 数据验证 ---
+pydantic==2.7.1
+pydantic-settings==2.2.1
+
+# --- LLM & Embedding ---
+openai==1.30.0
+langchain==0.2.0
+langchain-openai==0.1.7
+
+# --- 向量数据库 ---
+pymilvus==2.4.3
+
+# --- HTTP 客户端 ---
+requests==2.31.0
+httpx==0.27.0
+
+# --- 异步支持 ---
+aiofiles==23.2.1
+anyio==4.4.0
+
+# --- 文本处理 ---
+tiktoken==0.7.0
+
+# --- 工具 ---
+python-dotenv==1.0.1
+tenacity==8.3.0
+
+# --- 日志 ---
+loguru==0.7.2
+
+# --- 文件处理（Base64 上传） ---
+python-multipart==0.0.9
