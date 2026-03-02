@@ -38,3 +38,5 @@ loguru==0.7.2
 
 # --- 文件处理（Base64 上传） ---
 python-multipart==0.0.9
+
+jieba

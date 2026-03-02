@@ -6,9 +6,10 @@ app/retrieval/retriever.py
 工作流：
   retrieve()：
     1. 将 query 向量化（embeddings.py）
-    2. 从 Milvus 按 user_id 过滤进行 ANN 检索（milvus_client.py）
-    3. 对召回结果进行重排（reranker.py，带三级降级）
-    4. 返回 RetrievedChunk 列表（schemas.py）
+    2. 同时生成 BM25 稀疏向量（bm25.py）
+    3. 从 Milvus 执行混合检索（0.3*BM25 + 0.7*余弦，milvus_client.py）
+    4. 对召回结果进行重排（reranker.py，带三级降级）
+    5. 返回 RetrievedChunk 列表（schemas.py）
 
   store()：
     1. 对输入文本进行分块（chunking.py）
@@ -71,7 +72,7 @@ class Retriever:
         """
         执行完整的 RAG 检索流程，返回重排后的相关记忆切片。
 
-        流程：query → 向量化 → Milvus ANN 检索 → Rerank → TopN
+        流程：query → 向量化 → Milvus 混合检索（BM25+余弦） → Rerank → TopN
 
         Args:
             user_id: 用户 ID，用于多租户数据隔离。
@@ -89,10 +90,11 @@ class Retriever:
             logger.warning("query 向量化失败，返回空检索结果 | user_id={}", user_id)
             return []
 
-        # Step 2: Milvus ANN 检索（多租户隔离）
+        # Step 2: Milvus 混合检索（0.3*BM25 + 0.7*余弦，多租户隔离）
         raw_hits = await self._milvus_search(
             user_id=user_id,
             query_vector=query_vector,
+            query_text=query,
         )
         if not raw_hits:
             logger.info("Milvus 无相关历史记忆 | user_id={}", user_id)
@@ -204,8 +206,9 @@ class Retriever:
         self,
         user_id: str,
         query_vector: list,
+        query_text: str = "",
     ) -> list:
-        """异步执行 Milvus 检索，Milvus 不可用时返回空列表（降级）。"""
+        """异步执行 Milvus 混合检索（BM25+余弦），不可用时返回空列表（降级）。"""
         loop = asyncio.get_event_loop()
         try:
             hits = await loop.run_in_executor(
@@ -213,6 +216,7 @@ class Retriever:
                 lambda: self._milvus.search(
                     user_id=user_id,
                     query_vector=query_vector,
+                    query_text=query_text,
                     top_k=self._top_k,
                 ),
             )

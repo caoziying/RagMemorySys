@@ -46,6 +46,10 @@ class Settings(BaseSettings):
     retrieval_top_k: int = 10   # 向量召回数量
     rerank_top_n: int = 5       # 重排后保留数量
 
+    # ── 混合检索权重 ──────────────────────────────────────────
+    hybrid_sparse_weight: float = 0.3   # BM25 稀疏检索权重
+    hybrid_dense_weight:  float = 0.7   # 余弦相似度稠密检索权重
+
     # ── 路径 ─────────────────────────────────────────────────
     data_dir: str = "./data"
     log_dir: str = "./logs"
