@@ -111,7 +111,7 @@ services:
   # 4. Milvus Standalone（向量数据库核心）
   # ──────────────────────────────────────────────────────────
   milvus-standalone:
-    image: milvusdb/milvus:v2.4.5
+    image: milvusdb/milvus:v2.5.0
     container_name: milvus-standalone
     restart: unless-stopped
     command: ["milvus", "run", "standalone"]

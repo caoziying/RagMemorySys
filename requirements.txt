@@ -16,7 +16,7 @@ langchain==0.2.0
 langchain-openai==0.1.7
 
 # --- 向量数据库 ---
-pymilvus==2.4.3
+pymilvus>=2.5.0
 
 # --- HTTP 客户端 ---
 requests==2.31.0
@@ -38,5 +38,3 @@ loguru==0.7.2
 
 # --- 文件处理（Base64 上传） ---
 python-multipart==0.0.9
-
-jieba

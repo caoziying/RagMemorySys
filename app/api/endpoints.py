@@ -62,25 +62,36 @@ async def query_memory(
     """
     记忆查询主流程（参考 README 工作流要求）：
       1. 提取 user_id
-      2. 向量检索相关历史切片
+      2. 向量检索相关历史切片（语义召回）
       3. 读取 user.md 用户画像
-      4. 合并检索结果与画像，构造增强上下文
-      5. （后台异步）将本次 query 记录至对话日志
+      4. 读取最近 N 轮对话历史（时序上下文）
+      5. 合并检索结果、用户画像、近期对话，构造增强上下文
+      6. （后台异步）将本次 query 记录至对话日志
     """
     start_ts = time.monotonic()
     user_id = request.user_id
     logger.info("收到记忆查询请求 | user_id={} | query[:50]={}", user_id, request.query[:50])
 
-    # Step 2: 向量检索
+    # Step 2: 向量检索（语义相关历史）
     raw_chunks = await _retriever.retrieve(user_id=user_id, query=request.query)
 
     # Step 3: 读取用户画像
     user_profile = await _profile_manager.read_profile(user_id=user_id)
 
-    # Step 4: 合并构造增强上下文字符串
-    augmented_context = _build_augmented_context(user_profile, raw_chunks)
+    # Step 4: 读取最近 N 轮对话（时序上下文，补充向量检索的近期感知盲区）
+    # 兼容新旧两版 MemoryManager：
+    #   新版 get_recent_messages 返回 List[dict]
+    #   旧版 get_recent_history  返回 List[str]，在此统一转为 List[dict]
+    if hasattr(_memory_manager, 'get_recent_messages'):
+        recent_messages = await _memory_manager.get_recent_messages(user_id=user_id)
+    else:
+        raw_texts = await _memory_manager.get_recent_history(user_id=user_id)
+        recent_messages = _parse_history_texts(raw_texts)
 
-    # Step 5（后台）：记录本次 query 到对话日志，不阻塞响应
+    # Step 5: 合并检索结果、用户画像、最近对话，构造增强上下文字符串
+    augmented_context = _build_augmented_context(user_profile, raw_chunks, recent_messages)
+
+    # Step 6（后台）：记录本次 query 到对话日志，不阻塞响应
     background_tasks.add_task(
         log_conversation, user_id, "user", request.query
     )
@@ -214,29 +225,69 @@ async def health_check() -> HealthResponse:
 # 内部辅助函数
 # ──────────────────────────────────────────────────────────────
 
-def _build_augmented_context(user_profile: str, chunks: list[RetrievedChunk]) -> str:
+def _parse_history_texts(texts: list[str]) -> list[dict]:
     """
-    将用户画像与检索结果合并为一段结构化的增强上下文字符串，
+    将旧版 get_recent_history() 返回的 List[str] 解析为 List[dict]。
+    输入格式：["[user]: 内容", "[assistant]: 内容", ...]
+    输出格式：[{"role": "user", "content": "内容", "timestamp": ""}, ...]
+    """
+    messages = []
+    for text in texts:
+        if text.startswith("[user]: "):
+            messages.append({"role": "user",      "content": text[len("[user]: "):],      "timestamp": ""})
+        elif text.startswith("[assistant]: "):
+            messages.append({"role": "assistant", "content": text[len("[assistant]: "):], "timestamp": ""})
+        else:
+            messages.append({"role": "unknown",   "content": text, "timestamp": ""})
+    return messages
+
+
+def _build_augmented_context(
+    user_profile: str,
+    chunks: list[RetrievedChunk],
+    recent_messages: list[dict] | None = None,
+) -> str:
+    """
+    将用户画像、最近 N 轮对话、语义检索结果合并为结构化增强上下文。
     可直接注入外部 AI 代理的系统 Prompt。
 
+    三个信息源的分工：
+      - 用户画像：LLM 提炼的稳定个人信息（姓名/职业/偏好等）
+      - 最近对话：时序上最近的 N 轮消息（确保近期上下文不丢失）
+      - 语义检索：与当前 query 最相关的历史片段（可能跨越很久以前）
+
     Args:
-        user_profile: user.md 的文本内容。
-        chunks:       重排后的检索结果列表。
+        user_profile:    user.md 的文本内容。
+        chunks:          重排后的向量检索结果列表。
+        recent_messages: 最近 N 轮对话，格式 [{role, content, timestamp}, ...]
 
     Returns:
         格式化后的增强上下文字符串。
     """
     sections: list[str] = []
 
+    # 1. 用户画像
     if user_profile.strip():
         sections.append(f"## 用户画像\n{user_profile.strip()}")
 
+    # 2. 最近 N 轮对话（时序上下文，补充向量检索的近期感知盲区）
+    if recent_messages:
+        lines = []
+        for msg in recent_messages:
+            role    = msg.get("role", "unknown")
+            content = msg.get("content", "").strip()
+            ts      = msg.get("timestamp", "")
+            prefix  = f"[{ts[:16]}] " if ts else ""
+            lines.append(f"{prefix}[{role}]: {content}")
+        sections.append("## 最近对话记录\n" + "\n".join(lines))
+
+    # 3. 语义检索结果（与当前 query 相关的历史片段）
     if chunks:
         history_lines = [
-            f"- [{c.score:.3f}] {c.content.strip()}"
+            f"- [相关度 {c.score:.3f}] {c.content.strip()}"
             for c in chunks
         ]
-        sections.append("## 相关历史记忆\n" + "\n".join(history_lines))
+        sections.append("## 相关历史记忆（语义检索）\n" + "\n".join(history_lines))
 
     if not sections:
         return "（暂无历史记忆或用户画像）"
