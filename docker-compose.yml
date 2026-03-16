@@ -57,6 +57,33 @@ services:
       retries: 3
       start_period: 20s
 
+
+  # ──────────────────────────────────────────────────────────
+  # 1b. Upload 队列 Worker（异步消费 upload 任务）
+  # ──────────────────────────────────────────────────────────
+  rag-upload-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runner
+    container_name: rag-upload-worker
+    restart: unless-stopped
+    command: ["python", "-m", "app.workers.upload_consumer"]
+    env_file:
+      - .env
+    environment:
+      MILVUS_HOST: milvus-standalone
+      MILVUS_PORT: 19530
+      RERANKER_URL: http://host.docker.internal:8877/rerank
+    volumes:
+      - ./data:/app/data
+      - ./logs:/app/logs
+    depends_on:
+      milvus-standalone:
+        condition: service_healthy
+    networks:
+      - rag-network
+
   # ──────────────────────────────────────────────────────────
   # 2. Milvus 依赖：etcd（元数据存储）
   # ──────────────────────────────────────────────────────────

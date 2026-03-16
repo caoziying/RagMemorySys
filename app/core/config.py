@@ -42,6 +42,10 @@ class Settings(BaseSettings):
     memory_window_size: int = 10          # 滑动窗口保留的对话轮数
     memory_compress_threshold: int = 20   # 触发压缩的历史轮数阈值
 
+    # ── Upload 队列 Worker ───────────────────────────────
+    upload_retry_limit: int = 5
+    upload_worker_poll_interval: float = 1.0
+
     # ── 检索 ─────────────────────────────────────────────────
     retrieval_top_k: int = 10   # 向量召回数量
     rerank_top_n: int = 5       # 重排后保留数量
