@@ -12,6 +12,7 @@ from datetime import datetime
 from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
+import uuid
 
 
 # ──────────────────────────────────────────────────────────────
@@ -100,6 +101,11 @@ class MemoryUploadRequest(BaseModel):
         description="用户唯一标识符",
         examples=["user_12345"],
     )
+    request_id: str = Field(
+        default_factory=lambda: str(uuid.uuid4()),
+        description="上传请求幂等标识，重复提交同一 request_id 将被去重处理",
+        examples=["1f53b9cc-5ac6-4d78-b9ec-a857429f4f8f"],
+    )
     messages: Optional[List[dict]] = Field(
         None,
         description=(
@@ -122,8 +128,10 @@ class MemoryUploadResponse(BaseResponse):
     """对话历史上传响应体。"""
 
     user_id: str = Field(..., description="对应的用户 ID")
+    request_id: str = Field(..., description="上传请求唯一标识")
     chunks_stored: int = Field(0, description="本次成功存入 Milvus 的切片数量")
     profile_updated: bool = Field(False, description="用户画像是否被本次上传触发更新")
+    queued: bool = Field(False, description="任务是否成功进入上传队列")
     process_time_ms: Optional[float] = Field(None, description="处理耗时（毫秒）")
 
 
