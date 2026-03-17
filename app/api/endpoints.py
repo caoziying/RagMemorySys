@@ -10,9 +10,7 @@ app/api/endpoints.py
   GET  /health                    - 服务健康检查
 """
 
-import asyncio
 import time
-from datetime import datetime, timezone
 
 from fastapi import APIRouter, BackgroundTasks
 
@@ -29,6 +27,7 @@ from app.memory.manager import MemoryManager
 from app.memory.profile import ProfileManager
 from app.retrieval.retriever import Retriever
 from app.retrieval.milvus_client import MilvusClient
+from app.workers.upload_queue import UploadQueue
 
 logger = get_logger(__name__)
 
@@ -40,6 +39,7 @@ _retriever = Retriever()
 _memory_manager = MemoryManager()
 _profile_manager = ProfileManager()
 _milvus_client = MilvusClient()
+_upload_queue = UploadQueue()
 
 
 # ──────────────────────────────────────────────────────────────
@@ -133,9 +133,9 @@ async def upload_memory(
     """
     对话历史上传主流程：
       1. 解析消息列表或 Base64 文件为文本
-      2. 分块并向量化，写入 Milvus
-      3. 更新基础记忆（滑动窗口 / 压缩）
-      4. （后台异步）调用 LLM 提取用户信息，更新 user.md
+      2. 幂等检查：request_id 去重
+      3. 任务入队（由独立 worker 执行存储/更新/画像）
+      4. 返回受理结果
     """
     start_ts = time.monotonic()
     user_id = request.user_id
@@ -161,42 +161,55 @@ async def upload_memory(
         decoded_texts = _decode_base64_files(request.multifiles)
         texts.extend(decoded_texts)
 
+    request_id = request.request_id
+
     if not texts:
         return MemoryUploadResponse(
             success=False,
             message="请求中不包含任何有效内容（messages 或 multifiles 均为空）",
             user_id=user_id,
+            request_id=request_id,
+            queued=False,
         )
 
-    # Step 2: 分块存入 Milvus（在 retriever 中完成向量化）
-    chunks_stored = await _retriever.store(
-        user_id=user_id,
-        texts=texts,
-        timestamp=request.time,
-    )
+    if await _upload_queue.is_processed(request_id):
+        elapsed_ms = (time.monotonic() - start_ts) * 1000
+        logger.info("upload 请求幂等命中（已处理） | request_id={}", request_id)
+        return MemoryUploadResponse(
+            success=True,
+            message="重复请求：该 request_id 已处理",
+            user_id=user_id,
+            request_id=request_id,
+            chunks_stored=0,
+            profile_updated=False,
+            queued=False,
+            process_time_ms=round(elapsed_ms, 2),
+        )
 
-    # Step 3: 更新基础记忆（滑动窗口）
-    await _memory_manager.update(user_id=user_id, new_texts=texts)
-
-    # Step 4（后台）：LLM 提取用户信息并更新 user.md
-    background_tasks.add_task(
-        _profile_manager.extract_and_update_profile,
-        user_id,
-        "\n".join(texts),
+    queued = await _upload_queue.enqueue(
+        request_id=request_id,
+        payload={
+            "request_id": request_id,
+            "user_id": user_id,
+            "texts": texts,
+            "timestamp": request.time.isoformat(),
+        },
     )
 
     elapsed_ms = (time.monotonic() - start_ts) * 1000
     logger.info(
-        "记忆上传完成 | user_id={} | chunks_stored={} | 耗时={:.1f}ms",
-        user_id, chunks_stored, elapsed_ms,
+        "记忆上传请求已受理 | user_id={} | request_id={} | queued={} | 耗时={:.1f}ms",
+        user_id, request_id, queued, elapsed_ms,
     )
 
     return MemoryUploadResponse(
-        success=True,
-        message="上传成功，画像更新已在后台异步进行",
+        success=queued,
+        message="上传任务已入队，等待 worker 异步处理" if queued else "重复请求：该 request_id 已在队列中",
         user_id=user_id,
-        chunks_stored=chunks_stored,
-        profile_updated=False,  # 画像更新为后台异步，此处标记 False
+        request_id=request_id,
+        chunks_stored=0,
+        profile_updated=False,
+        queued=queued,
         process_time_ms=round(elapsed_ms, 2),
     )
 
