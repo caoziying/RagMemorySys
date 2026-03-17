@@ -34,7 +34,9 @@ RAG_Memory 是一个以 **FastAPI** 为核心的微服务，为外部 AI 对话�
 ## 核心特性
 
 - **多租户隔离**：所有数据以 `user_id` 为键严格隔离，向量检索带过滤条件，文件存储独立目录。
-- **自动用户画像**：每次对话后异步触发 LLM 提取用户信息，增量合并至 `user.md`，无需手动维护。
+- **异步上传队列 Worker**：`upload` 请求先入队，独立消费者异步执行向量存储与记忆更新，降低主请求时延。
+- **可靠消费 + 幂等控制**：成功后 ack，失败按上限重试并进入 DLQ；基于 `request_id` 去重，避免重复写入。
+- **自动用户画像**：上传任务处理完成后触发 LLM 提取用户信息，增量合并至 `user.md`，无需手动维护。
 - **滑动窗口 + 自动压缩**：本地历史保留最近 N 条，超阈值后 LLM 自动生成摘要压缩旧记忆。
 - **三级重排降级链**：本地 Reranker HTTP → Embedding 余弦相似度 → 原始召回顺序，任意环节失败自动降级。
 - **Milvus 懒加载重连**：服务启动时 Milvus 未就绪不影响 API 可用性，每次操作前自动重连。
@@ -53,6 +55,7 @@ RAG_Memory 是一个以 **FastAPI** 为核心的微服务，为外部 AI 对话�
      ▼
 ┌─────────────────────────────────────────────┐
 │               FastAPI (rag-api)              │
+│      upload 入队（request_id 幂等）          │
 │                                             │
 │  ┌──────────────┐    ┌─────────────────┐   │
 │  │  基础记忆层   │    │   向量检索层     │   │
@@ -67,6 +70,10 @@ RAG_Memory 是一个以 **FastAPI** 为核心的微服务，为外部 AI 对话�
 │  └──────────────────────────────────────┘  │
 └─────────────────────────────────────────────┘
      │
+     ├── Upload Worker（rag-upload-worker）
+     │     ├── 消费 upload_queue（SQLite）
+     │     ├── 失败重试（指数退避）
+     │     └── 超限进入 upload_dlq
      ├── Milvus Standalone（向量数据库）
      ├── Attu（Milvus 可视化管理，:8080）
      └── 本地 Reranker HTTP 服务（外部提供）
@@ -100,6 +107,9 @@ RAG_Memory/
 │   │   └── retriever.py        # 核心调度器（串联完整 RAG 流程）
 │   ├── llm/
 │   │   └── client.py           # LLM 客户端（OpenAI SDK + LangChain）
+│   ├── workers/
+│   │   ├── upload_queue.py     # SQLite 上传队列（重试 / DLQ / 幂等）
+│   │   └── upload_consumer.py  # 独立上传消费者
 │   └── main.py                 # FastAPI 实例、中间件、路由注册
 ├── data/
 │   └── users/
@@ -162,7 +172,7 @@ docker compose up -d
 docker compose logs -f rag-api
 ```
 
-看到以下输出表示启动成功：
+看到以下输出表示启动成功（API 与 worker 均应为 Up）：
 
 ```
 INFO  | RAG_Memory 服务启动完成，准备接受请求。
@@ -224,13 +234,14 @@ Milvus 可视化管理界面：http://localhost:8080
 
 ### POST `/api/v1/chat/memory/upload`
 
-对话后调用，将本轮对话内容存入记忆系统，并异步触发用户画像更新。
+对话后调用，接口会将任务写入上传队列并快速返回；实际存储由独立 worker 异步完成。
 
 **请求体（对话消息格式）：**
 
 ```json
 {
   "user_id": "user_12345",
+  "request_id": "1f53b9cc-5ac6-4d78-b9ec-a857429f4f8f",
   "messages": [
     {"role": "user", "content": "我是张三，Python 工程师，正在做 RAG 项目。"},
     {"role": "assistant", "content": "好的，请问目前进展如何？"},
@@ -245,6 +256,7 @@ Milvus 可视化管理界面：http://localhost:8080
 ```json
 {
   "user_id": "user_12345",
+  "request_id": "1f53b9cc-5ac6-4d78-b9ec-a857429f4f8f",
   "multifiles": ["base64编码的文件内容..."],
   "time": "2024-10-27T10:05:00Z"
 }
@@ -255,11 +267,13 @@ Milvus 可视化管理界面：http://localhost:8080
 ```json
 {
   "success": true,
-  "message": "上传成功，画像更新已在后台异步进行",
+  "message": "上传任务已入队，等待 worker 异步处理",
   "user_id": "user_12345",
-  "chunks_stored": 3,
+  "request_id": "1f53b9cc-5ac6-4d78-b9ec-a857429f4f8f",
+  "chunks_stored": 0,
   "profile_updated": false,
-  "process_time_ms": 3771.8
+  "queued": true,
+  "process_time_ms": 35.2
 }
 ```
 
@@ -281,6 +295,8 @@ Milvus 可视化管理界面：http://localhost:8080
 | `RERANKER_URL` | 本地 Reranker HTTP 接口地址 | `http://localhost:8080/rerank` |
 | `MEMORY_WINDOW_SIZE` | 滑动窗口保留对话轮数 | `10` |
 | `MEMORY_COMPRESS_THRESHOLD` | 触发压缩的历史条数阈值 | `20` |
+| `UPLOAD_RETRY_LIMIT` | upload 消费失败重试上限 | `5` |
+| `UPLOAD_WORKER_POLL_INTERVAL` | worker 轮询间隔（秒） | `1.0` |
 | `RETRIEVAL_TOP_K` | 向量召回数量 | `10` |
 | `RERANK_TOP_N` | 重排后返回数量 | `5` |
 
@@ -306,15 +322,21 @@ Milvus 可视化管理界面：http://localhost:8080
 ### Upload 流程（对话后）
 
 ```
-请求到达
+请求到达（rag-api）
   → 解析 messages / Base64 文件为文本
+  → request_id 幂等检查
+  → 写入 upload_queue（SQLite）
+  → 快速返回 queued=true
+
+Worker 消费（rag-upload-worker）
+  → 拉取队列消息并标记 processing
   → 文本分块（滑动窗口 chunking）
   → 批量向量化
   → 写入 Milvus
   → 更新本地滑动窗口历史（history.jsonl）
   → 若历史条数超阈值，LLM 自动压缩 → compressed.md
-  → 返回响应
-  → [后台异步] LLM 提取用户信息 → 合并更新 user.md
+  → 触发画像提取并更新 user.md
+  → 成功 ack；失败按指数退避重试，超限进入 DLQ
 ```
 
 ---
